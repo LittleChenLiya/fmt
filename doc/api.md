@@ -439,6 +439,65 @@ To force the use of legacy compile-time checks, define the preprocessor
 variable `FMT_ENFORCE_COMPILE_STRING`. When set, functions accepting
 `FMT_STRING` will fail to compile with regular strings.
 
+<a id="analyze-api"></a>
+## Format String Analysis
+
+`fmt/analyze.h` provides format string contract analysis for tools that
+only have a format string and no arguments, such as template editors and
+linters. It reuses the same parsing infrastructure as formatting, so escaped
+braces (`{{` and `}}`) are not treated as fields and the automatic/manual
+argument indexing rules are identical.
+
+::: analyzed_arg_kind
+
+::: analyzed_arg_ref
+
+::: analyzed_field
+
+::: format_string_analysis
+
+::: analyze_format_string(string_view, size_t)
+
+The analysis does not access arguments and never calls a formatter. Syntax
+errors that can be determined without argument types are reported with a
+UTF-8 byte offset. Format specs that don't conform to the standard grammar
+of any built-in type, for example specs consumed by a custom formatter, are
+preserved as-is and marked `spec_type_dependent`; their validity, as well
+as the per-type validity of standard specs, is left to type checking.
+
+**Example**:
+
+```c++
+#include <fmt/analyze.h>
+
+void analyze_and_print(fmt::string_view fmt_str) {
+  auto result = fmt::analyze_format_string(fmt_str);
+  if (!result.ok()) {
+    fmt::print("error at byte {}: {}\n", result.error_offset(),
+               result.error_message());
+    return;
+  }
+  for (const auto& f : result.fields()) {
+    fmt::print("field [{}, {}): spec='{}'\n", f.begin, f.end, f.spec);
+    if (f.has_dynamic_width)
+      fmt::print("  dynamic width at [{}, {})\n", f.width_ref.begin,
+                 f.width_ref.end);
+    if (f.has_dynamic_precision)
+      fmt::print("  dynamic precision at [{}, {})\n",
+                 f.precision_ref.begin, f.precision_ref.end);
+  }
+}
+```
+
+prints
+
+```
+field [0, 15): spec='>{width}'
+  dynamic width at [8, 13)
+field [16, 25): spec='.{1}f'
+  dynamic precision at [21, 22)
+```
+
 <a id="ranges-api"></a>
 ## Range and Tuple Formatting
 

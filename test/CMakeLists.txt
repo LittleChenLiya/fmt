@@ -41,6 +41,7 @@ function (add_fmt_test name)
 endfunction ()
 
 add_fmt_test(args-test)
+add_fmt_test(analyze-test)
 add_fmt_test(core-test)
 add_fmt_test(assert-test)
 add_fmt_test(chrono-test)

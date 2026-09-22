@@ -244,6 +244,7 @@ class CxxHandler(BaseHandler):
         """The base directory of the project."""
 
         headers = [
+            "analyze.h",
             "args.h",
             "chrono.h",
             "color.h",
