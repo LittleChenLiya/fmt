@@ -40,6 +40,7 @@ function (add_fmt_test name)
   add_test(NAME ${name} COMMAND ${name})
 endfunction ()
 
+add_fmt_test(analyze-test)
 add_fmt_test(args-test)
 add_fmt_test(core-test)
 add_fmt_test(assert-test)

@@ -275,6 +275,7 @@ endfunction ()
 set(FMT_HEADERS)
 foreach (
   header
+  analyze.h
   args.h
   base.h
   chrono.h

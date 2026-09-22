@@ -289,6 +289,41 @@ bloat.
 
 ::: runtime(string_view)
 
+### Format String Analysis
+
+Tools such as format string editors that only have a format string but no
+format arguments can inspect the string with `fmt::analyze_format_string`
+defined in `fmt/analyze.h`:
+
+```c++
+#include <fmt/analyze.h>
+
+auto analysis = fmt::analyze_format_string("{name:>{width}} {0:.{1}f} {{ok}}");
+if (!analysis.ok())
+  report_error(analysis.error_offset(), analysis.error_message());
+for (const auto& field : analysis.fields()) {
+  // field.begin/field.end: UTF-8 byte range of the replacement field
+  // field.arg: positional (automatic/manual) or named argument identity
+  // field.spec_begin/field.spec_end: raw format spec text
+  // field.standard_specs: whether the spec is standard syntax
+  // field.refs: dynamic width/precision argument references
+}
+```
+
+The analysis reuses {fmt}'s format string parser: escaped braces ("{{" and
+"}}") are not fields and automatic/manual positional numbering follows the
+usual rules, including errors on mixing them. Definite syntax errors are
+reported with their byte offset, while anything that depends on argument
+types is left to type checking at format time. A spec that is not standard
+syntax is preserved verbatim and marked as type-dependent
+(`standard_specs == false`) since a custom formatter may still accept it.
+The analysis never invokes formatters or accesses arguments and returns an
+immutable, reusable result. The number of reported fields can be limited
+with the optional `max_fields` parameter. See `example/analyze.cc` for a
+program that prints the field tree and error offsets.
+
+::: analyze_format_string(string_view, size_t)
+
 ### Type Erasure
 
 You can create your own formatting function with compile-time checks and
