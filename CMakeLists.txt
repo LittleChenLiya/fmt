@@ -288,6 +288,7 @@ foreach (
   ostream.h
   printf.h
   ranges.h
+  redact.h
   std.h
   xchar.h)
   set(FMT_HEADERS ${FMT_HEADERS} include/fmt/${header})
