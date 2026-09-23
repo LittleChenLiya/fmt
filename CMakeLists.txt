@@ -287,6 +287,7 @@ foreach (
   os.h
   ostream.h
   printf.h
+  redact.h
   ranges.h
   std.h
   xchar.h)
