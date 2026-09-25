@@ -1919,6 +1919,162 @@ TEST(format_test, format_custom) {
   EXPECT_EQ(fmt::format("{:04}", Answer()), "0042");
 }
 
+namespace {
+
+struct multi_segment {
+  int* format_count;
+};
+
+struct throwing_value {};
+
+auto slice(const fmt::format_with_spans_result& result, size_t index)
+    -> std::string {
+  const auto& span = result.spans[index];
+  return result.text.substr(span.begin, span.end - span.begin);
+}
+
+}  // namespace
+
+FMT_BEGIN_NAMESPACE
+template <> struct formatter<multi_segment> {
+  FMT_CONSTEXPR auto parse(format_parse_context& ctx)
+      -> decltype(ctx.begin()) {
+    return ctx.begin();
+  }
+
+  auto format(const multi_segment& value, format_context& ctx) const
+      -> decltype(ctx.out()) {
+    ++*value.format_count;
+    // Write the field in multiple segments.
+    fmt::format_to(ctx.out(), "a");
+    fmt::format_to(ctx.out(), "b");
+    return fmt::format_to(ctx.out(), "c");
+  }
+};
+
+template <> struct formatter<throwing_value> {
+  FMT_CONSTEXPR auto parse(format_parse_context& ctx)
+      -> decltype(ctx.begin()) {
+    return ctx.begin();
+  }
+
+  auto format(throwing_value, format_context&) const -> fmt::appender {
+    throw std::runtime_error("formatting failed");
+  }
+};
+FMT_END_NAMESPACE
+
+TEST(format_test, format_with_spans) {
+  auto result = fmt::format_with_spans("id={0:04} again={0}", 7);
+  EXPECT_EQ(result.text, "id=0007 again=7");
+  EXPECT_EQ(result.text, fmt::format("id={0:04} again={0}", 7));
+  ASSERT_EQ(result.spans.size(), 2u);
+  // Each span covers the field's own output including padding and repeated
+  // use of the same argument produces multiple spans.
+  EXPECT_EQ(result.spans[0].arg_id, 0);
+  EXPECT_EQ(result.spans[1].arg_id, 0);
+  EXPECT_EQ(slice(result, 0), "0007");
+  EXPECT_EQ(slice(result, 1), "7");
+  // Print the text, spans and sliced fields for log-viewer style inspection.
+  fmt::print("text: {}\n", result.text);
+  for (const auto& span : result.spans)
+    fmt::print("span [{}, {}) arg={} field={}\n", span.begin, span.end,
+               span.arg_id,
+               result.text.substr(span.begin, span.end - span.begin));
+}
+
+TEST(format_test, format_with_spans_escaped_braces) {
+  // Escaped braces are literal text and produce no spans.
+  auto result = fmt::format_with_spans("{{{}}}", 5);
+  EXPECT_EQ(result.text, "{5}");
+  ASSERT_EQ(result.spans.size(), 1u);
+  EXPECT_EQ(result.spans[0].begin, 1u);
+  EXPECT_EQ(result.spans[0].end, 2u);
+  EXPECT_EQ(slice(result, 0), "5");
+}
+
+TEST(format_test, format_with_spans_named_args) {
+  auto result = fmt::format_with_spans("id={id} w={width}", fmt::arg("id", 7),
+                                       fmt::arg("width", 42));
+  EXPECT_EQ(result.text, "id=7 w=42");
+  ASSERT_EQ(result.spans.size(), 2u);
+  EXPECT_EQ(result.spans[0].arg_id, 0);
+  EXPECT_EQ(result.spans[1].arg_id, 1);
+  EXPECT_EQ(slice(result, 0), "7");
+  EXPECT_EQ(slice(result, 1), "42");
+}
+
+TEST(format_test, format_with_spans_dynamic_specs) {
+  // Dynamic width/precision arguments are recorded as dependencies and do
+  // not get their own spans.
+  auto result = fmt::format_with_spans("[{0:{1}}] {2:.{3}f}", 7, 4, 1.5, 2);
+  EXPECT_EQ(result.text, "[   7] 1.50");
+  ASSERT_EQ(result.spans.size(), 2u);
+  EXPECT_EQ(slice(result, 0), "   7");
+  EXPECT_EQ(slice(result, 1), "1.50");
+  ASSERT_EQ(result.spans[0].deps.size(), 1u);
+  EXPECT_EQ(result.spans[0].deps[0], 1);
+  ASSERT_EQ(result.spans[1].deps.size(), 1u);
+  EXPECT_EQ(result.spans[1].deps[0], 3);
+  // A named dynamic width is resolved to its argument ID.
+  result = fmt::format_with_spans("{0:{width}}", 7, fmt::arg("width", 3));
+  EXPECT_EQ(result.text, "  7");
+  ASSERT_EQ(result.spans.size(), 1u);
+  ASSERT_EQ(result.spans[0].deps.size(), 1u);
+  EXPECT_EQ(result.spans[0].deps[0], 1);
+}
+
+TEST(format_test, format_with_spans_unicode) {
+  // Spans are byte ranges, so multibyte UTF-8 in literal text shifts offsets.
+  auto result = fmt::format_with_spans("\xce\xb1={}", 1);
+  EXPECT_EQ(result.text, "\xce\xb1=1");
+  ASSERT_EQ(result.spans.size(), 1u);
+  EXPECT_EQ(result.spans[0].begin, 3u);
+  EXPECT_EQ(slice(result, 0), "1");
+  // Multibyte fill is part of the field's span.
+  result = fmt::format_with_spans("{:\xce\xb1>3}", 1);
+  EXPECT_EQ(result.text, "\xce\xb1\xce\xb1"
+                         "1");
+  ASSERT_EQ(result.spans.size(), 1u);
+  EXPECT_EQ(slice(result, 0), result.text);
+}
+
+TEST(format_test, format_with_spans_custom_formatter) {
+  int format_count = 0;
+  auto result = fmt::format_with_spans("<{}>", multi_segment{&format_count});
+  EXPECT_EQ(result.text, "<abc>");
+  // The custom formatter runs exactly once and its whole output, written in
+  // multiple segments, is covered by a single span.
+  EXPECT_EQ(format_count, 1);
+  ASSERT_EQ(result.spans.size(), 1u);
+  EXPECT_EQ(slice(result, 0), "abc");
+}
+
+TEST(format_test, format_with_spans_exception) {
+  // An exception during formatting propagates and no partial result with
+  // incomplete spans is produced.
+  EXPECT_THROW_MSG((void)fmt::format_with_spans("a{}b", throwing_value()),
+                   std::runtime_error, "formatting failed");
+}
+
+TEST(format_test, format_with_spans_empty_field) {
+  // A field with empty output still gets a zero-length span.
+  auto result = fmt::format_with_spans("[{}]", "");
+  EXPECT_EQ(result.text, "[]");
+  ASSERT_EQ(result.spans.size(), 1u);
+  EXPECT_EQ(result.spans[0].begin, 1u);
+  EXPECT_EQ(result.spans[0].end, 1u);
+  EXPECT_EQ(slice(result, 0), "");
+}
+
+TEST(format_test, format_with_spans_matches_format) {
+  auto result =
+      fmt::format_with_spans("{0} {1} {0} {2:>8.3f} {3:+04}", "x", 3, 1.5, 7);
+  EXPECT_EQ(result.text,
+            fmt::format("{0} {1} {0} {2:>8.3f} {3:+04}", "x", 3, 1.5, 7));
+  EXPECT_EQ(result.spans.size(), 5u);
+}
+
 TEST(format_test, format_to_custom) {
   char buf[10] = {};
   auto end = fmt::format_to(buf, "{}", Answer());
