@@ -50,6 +50,7 @@ nav:
   - Get Started: get-started.md
   - API: api.md
   - Syntax: syntax.md
+  - Record Buffer: record-buffer.md
 
 exclude_docs: ChangeLog-old.md
 

@@ -142,6 +142,7 @@ extern "C++" {
 #include "fmt/ostream.h"
 #include "fmt/printf.h"
 #include "fmt/ranges.h"
+#include "fmt/record_buffer.h"
 #include "fmt/std.h"
 #include "fmt/xchar.h"
 
