@@ -134,6 +134,7 @@ extern "C++" {
 #include "fmt/chrono.h"
 #include "fmt/color.h"
 #include "fmt/compile.h"
+#include "fmt/decimal.h"
 #include "fmt/enum.h"
 #include "fmt/format.h"
 #if FMT_OS
