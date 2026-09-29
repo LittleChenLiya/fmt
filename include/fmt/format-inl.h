@@ -1463,6 +1463,20 @@ FMT_FUNC auto vformat(string_view fmt, format_args args) -> std::string {
   return to_string(buffer);
 }
 
+FMT_FUNC auto vformat_with_spans(string_view fmt, format_args args)
+    -> format_with_spans_result {
+  // A single formatting pass: the text is byte-identical to vformat and each
+  // field (including custom formatters) is evaluated exactly once. If
+  // formatting throws, the locals are discarded and no partial result
+  // escapes.
+  auto buf = memory_buffer();
+  auto spans = std::vector<format_span>();
+  detail::parse_format_string(
+      fmt, detail::span_format_handler<>{
+               parse_context<>(fmt), {appender(buf), args, {}}, &buf, &spans});
+  return {to_string(buf), std::move(spans)};
+}
+
 namespace detail {
 
 FMT_FUNC void vformat_to(buffer<char>& buf, string_view fmt, format_args args,

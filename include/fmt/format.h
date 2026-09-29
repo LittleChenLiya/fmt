@@ -60,6 +60,7 @@
 #  include <stdexcept>     // std::runtime_error
 #  include <string>        // std::string
 #  include <system_error>  // std::system_error
+#  include <vector>        // std::vector
 
 // Check FMT_CPLUSPLUS to avoid a warning in MSVC.
 #  if FMT_HAS_INCLUDE(<bit>) && FMT_CPLUSPLUS > 201703L
@@ -1118,6 +1119,33 @@ class FMT_SO_VISIBILITY("default") format_error : public std::runtime_error {
 FMT_PRAGMA_CLANG(diagnostic pop)
 
 class loc_value;
+
+/**
+ * A byte range in the output of `format_with_spans` corresponding to a
+ * single replacement field.
+ *
+ * The range covers the field's own output, including any padding, but not
+ * the surrounding literal text. A field that formats to an empty string
+ * produces a zero-length range. Dynamic width and precision arguments are
+ * recorded as dependencies (`width_arg_id`/`precision_arg_id`) and do
+ * not produce ranges of their own.
+ */
+struct format_span {
+  size_t begin;  /// Offset of the first byte of the field output.
+  size_t end;    /// Offset one past the last byte of the field output.
+  int arg_id;    /// Id of the argument formatted into this range.
+  int width_arg_id;      /// Id of the dynamic width argument or -1.
+  int precision_arg_id;  /// Id of the dynamic precision argument or -1.
+};
+
+/**
+ * The result of `format_with_spans`: the formatted text together with the
+ * output ranges of all replacement fields in order of appearance.
+ */
+struct format_with_spans_result {
+  std::string text;
+  std::vector<format_span> spans;
+};
 
 FMT_END_EXPORT
 namespace detail {
@@ -4035,6 +4063,66 @@ template <typename Char = char> struct format_handler {
   FMT_NORETURN void on_error(const char* message) { report_error(message); }
 };
 
+// A format handler that additionally records the output range of each
+// replacement field.
+template <typename Char = char>
+struct span_format_handler : format_handler<Char> {
+  const buffer<Char>* buf;
+  std::vector<format_span>* spans;
+
+  span_format_handler(parse_context<Char> parse_ctx,
+                      buffered_context<Char> ctx, const buffer<Char>* buf,
+                      std::vector<format_span>* spans)
+      : format_handler<Char>{std::move(parse_ctx), std::move(ctx)},
+        buf(buf),
+        spans(spans) {}
+
+  void on_replacement_field(int id, const Char* p) {
+    auto begin = buf->size();
+    format_handler<Char>::on_replacement_field(id, p);
+    spans->push_back({begin, buf->size(), id, -1, -1});
+  }
+
+  auto on_format_specs(int id, const Char* begin, const Char* end)
+      -> const Char* {
+    auto& ctx = this->ctx;
+    auto arg = ctx.arg(id);
+    if (!arg) report_error("argument not found");
+    auto out_begin = buf->size();
+    // Not using a visitor for custom types gives better codegen.
+    if (arg.format_custom(begin, this->parse_ctx, ctx)) {
+      spans->push_back({out_begin, buf->size(), id, -1, -1});
+      return this->parse_ctx.begin();
+    }
+
+    auto specs = dynamic_format_specs<Char>();
+    begin = parse_format_specs(begin, end, specs, this->parse_ctx, arg.type());
+    int width_arg_id = -1, precision_arg_id = -1;
+    if (specs.dynamic()) {
+      handle_dynamic_spec(specs.dynamic_width(), specs.width, specs.width_ref,
+                          ctx);
+      handle_dynamic_spec(specs.dynamic_precision(), specs.precision,
+                          specs.precision_ref, ctx);
+      width_arg_id = ref_id(specs.dynamic_width(), specs.width_ref, ctx);
+      precision_arg_id =
+          ref_id(specs.dynamic_precision(), specs.precision_ref, ctx);
+    }
+
+    arg.visit(arg_formatter<Char>{ctx.out(), specs, ctx.locale()});
+    spans->push_back(
+        {out_begin, buf->size(), id, width_arg_id, precision_arg_id});
+    return begin;
+  }
+
+ private:
+  static auto ref_id(arg_id_kind kind, const arg_ref<Char>& ref,
+                     buffered_context<Char>& ctx) -> int {
+    if (kind == arg_id_kind::index) return ref.index;
+    if (kind == arg_id_kind::name) return ctx.arg_id(ref.name);
+    return -1;
+  }
+};
+
 // It is used in format-inl.h and os.cc.
 using format_func = void (*)(detail::buffer<char>&, int, const char*);
 FMT_API void do_report_error(format_func func, int error_code,
@@ -4594,6 +4682,30 @@ FMT_NODISCARD FMT_INLINE auto formatted_size(locale_ref loc,
 }
 
 FMT_API auto vformat(string_view fmt, format_args args) -> std::string;
+
+/**
+ * Formats `args` according to specifications in `fmt` and returns the
+ * result together with the byte range of each replacement field's output.
+ *
+ * The returned text is identical to the output of `fmt::format`. Each
+ * replacement field, including custom formatters, is evaluated exactly once
+ * and if formatting throws no partial result is produced.
+ *
+ * **Example**:
+ *
+ *     auto result = fmt::format_with_spans("id={0:04} again={0}", 7);
+ *     // result.text == "id=0007 again=7"
+ *     // result.spans[0] covers "0007", result.spans[1] covers "7".
+ */
+template <typename... T>
+FMT_NODISCARD FMT_INLINE auto format_with_spans(format_string<T...> fmt,
+                                                T&&... args)
+    -> format_with_spans_result {
+  return vformat_with_spans(fmt.str, vargs<T...>{{args...}});
+}
+
+FMT_API auto vformat_with_spans(string_view fmt, format_args args)
+    -> format_with_spans_result;
 
 /**
  * Formats `args` according to specifications in `fmt` and returns the result

@@ -345,6 +345,28 @@ formatting functions and locale support.
 
 ::: vformat(string_view, format_args)
 
+::: format_with_spans(format_string<T...>, T&&...)
+
+::: vformat_with_spans(string_view, format_args)
+
+`format_with_spans` returns a `fmt::format_with_spans_result` containing
+the formatted text (byte-identical to `fmt::format`) and a
+`fmt::format_span` for each replacement field. Each span is the byte range
+of the field's own output, including padding but excluding surrounding
+literal text, which makes it possible to associate parts of the output with
+the arguments they came from, e.g. in a log viewer. Reusing the same
+argument in multiple fields produces one span per field. Dynamic width and
+precision arguments are recorded as dependencies of the field
+(`width_arg_id`/`precision_arg_id`) and don't get spans of their own. A
+field that formats to an empty string produces a zero-length span.
+
+**Example**:
+
+    auto result = fmt::format_with_spans("id={0:04} again={0}", 7);
+    // result.text == "id=0007 again=7"
+    // result.spans[0] == [3, 7)  -> "0007"
+    // result.spans[1] == [14, 15) -> "7"
+
 ::: operator""_a()
 
 ### Utilities
