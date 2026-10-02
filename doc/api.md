@@ -457,6 +457,25 @@ Using `fmt::join`, you can separate tuple elements with a custom separator:
     fmt::print("{}", fmt::join(t, ", "));
     // Output: 1, a
 
+Formatting an unordered associative container such as `std::unordered_map`
+directly produces output in an unspecified iteration order. Use
+`fmt::stable_map` to create a snapshot of a map with entries ordered by a
+caller-provided key comparator, giving deterministic output:
+
+    #include <fmt/ranges.h>
+
+    auto m = std::unordered_map<std::string, int>{{"two", 2}, {"one", 1}};
+    fmt::print("{}", fmt::stable_map(m, std::less<std::string>()));
+    // Output: {"one": 1, "two": 2}
+
+The snapshot owns copies of the entries, so later modifications of the
+original map do not affect the formatted output. Formatting reuses the
+formatters of the underlying key and value types, including debug escaping
+of strings, and keys that are distinct according to the comparator are kept
+even if they format to the same text. If the comparator throws while the
+snapshot is being built, the call fails and no snapshot is returned. See
+`examples/stable-map.cc` for a complete demo.
+
 ::: join(Range&&, string_view)
 
 ::: join(It, Sentinel, string_view)

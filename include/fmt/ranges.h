@@ -11,6 +11,7 @@
 #ifndef FMT_MODULE
 #  include <initializer_list>
 #  include <iterator>
+#  include <map>
 #  include <tuple>
 #  include <type_traits>
 #  include <utility>
@@ -629,6 +630,67 @@ struct formatter<
     basic_string_view<Char> close = detail::string_literal<Char, '}'>{};
     if (!no_delimiters_) out = detail::copy<Char>(close, out);
     return out;
+  }
+};
+
+/**
+ * A snapshot of map entries stored in the order defined by a caller-provided
+ * key comparator. Formatting a snapshot is deterministic, unlike formatting
+ * an unordered associative container directly. The snapshot owns copies of
+ * the entries, so later modifications of the original map do not affect it.
+ */
+template <typename Key, typename T, typename Compare>
+class stable_map_snapshot {
+ private:
+  std::map<Key, T, Compare> entries_;
+
+ public:
+  template <typename Map>
+  explicit stable_map_snapshot(const Map& map, Compare comp)
+      : entries_(std::move(comp)) {
+    // Copy the entries into the ordered snapshot. If the comparator or a
+    // copy throws, construction fails and no snapshot is produced.
+    for (auto&& entry : map) entries_.emplace(entry.first, entry.second);
+  }
+
+  auto entries() const -> const std::map<Key, T, Compare>& {
+    return entries_;
+  }
+};
+
+/**
+ * Returns a snapshot of `map` with entries ordered by the key comparator
+ * `comp`, giving deterministic output for unordered maps such as
+ * `std::unordered_map`. Formatting reuses the formatters of the underlying
+ * key and value types, including debug escaping of strings. Keys that are
+ * distinct according to `comp` are kept even if they format to the same
+ * text. If `comp` throws, no snapshot is returned.
+ *
+ * **Example**:
+ *
+ *     auto m = std::unordered_map<std::string, int>{{"two", 2}, {"one", 1}};
+ *     fmt::print("{}", fmt::stable_map(m, std::less<std::string>()));
+ *     // Output: {"one": 1, "two": 2}
+ */
+template <typename Map, typename Compare>
+auto stable_map(const Map& map, Compare comp)
+    -> stable_map_snapshot<typename Map::key_type, typename Map::mapped_type,
+                           Compare> {
+  return stable_map_snapshot<typename Map::key_type,
+                             typename Map::mapped_type, Compare>(
+      map, std::move(comp));
+}
+
+// A stable map snapshot formatter. Reuses the map formatter, and therefore
+// the key/value formatters and debug escaping of the underlying types.
+template <typename Key, typename T, typename Compare, typename Char>
+struct formatter<stable_map_snapshot<Key, T, Compare>, Char>
+    : formatter<std::map<Key, T, Compare>, Char> {
+  template <typename FormatContext>
+  auto format(const stable_map_snapshot<Key, T, Compare>& snapshot,
+              FormatContext& ctx) const -> decltype(ctx.out()) {
+    return formatter<std::map<Key, T, Compare>, Char>::format(
+        snapshot.entries(), ctx);
   }
 };
 

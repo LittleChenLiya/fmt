@@ -13,7 +13,9 @@
 #include <queue>
 #include <set>
 #include <stack>
+#include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -119,6 +121,100 @@ FMT_END_NAMESPACE
 TEST(ranges_test, format_map_custom_pair) {
   EXPECT_EQ(fmt::format("{}", std::map<int, test_map_value>{{42, {}}}),
             "{42: \"foo\"}");
+}
+
+TEST(ranges_test, stable_map_deterministic_order) {
+  // The same entries inserted in different orders format identically.
+  auto first = std::unordered_map<std::string, int>{
+      {"delta", 4}, {"alpha", 1}, {"charlie", 3}, {"bravo", 2}};
+  auto second = std::unordered_map<std::string, int>{
+      {"bravo", 2}, {"charlie", 3}, {"alpha", 1}, {"delta", 4}};
+  auto by_key = std::less<std::string>();
+  auto expected = "{\"alpha\": 1, \"bravo\": 2, \"charlie\": 3, \"delta\": 4}";
+  EXPECT_EQ(fmt::format("{}", fmt::stable_map(first, by_key)), expected);
+  EXPECT_EQ(fmt::format("{}", fmt::stable_map(second, by_key)), expected);
+  EXPECT_EQ(fmt::format("{}", fmt::stable_map(first, by_key)),
+            fmt::format("{}", fmt::stable_map(second, by_key)));
+  // Map format specs still apply.
+  EXPECT_EQ(fmt::format("{:n}", fmt::stable_map(first, by_key)),
+            "\"alpha\": 1, \"bravo\": 2, \"charlie\": 3, \"delta\": 4");
+}
+
+TEST(ranges_test, stable_map_escapes_quoted_keys) {
+  auto m = std::unordered_map<std::string, int>{{"say \"hi\"", 1}, {"a", 2}};
+  EXPECT_EQ(fmt::format("{}", fmt::stable_map(m, std::less<std::string>())),
+            "{\"a\": 2, \"say \\\"hi\\\"\": 1}");
+}
+
+namespace {
+// A key whose formatted text does not determine its identity.
+struct aliased_key {
+  int id;
+  std::string text;
+};
+bool operator==(const aliased_key& a, const aliased_key& b) {
+  return a.id == b.id;
+}
+struct aliased_key_hash {
+  auto operator()(const aliased_key& k) const -> size_t {
+    return std::hash<int>()(k.id);
+  }
+};
+// A value with a custom formatter.
+struct scaled_value {
+  int value;
+};
+}  // namespace
+
+FMT_BEGIN_NAMESPACE
+template <> struct formatter<aliased_key> : formatter<string_view> {
+  auto format(const aliased_key& k, format_context& ctx) const
+      -> format_context::iterator {
+    return formatter<string_view>::format(k.text, ctx);
+  }
+};
+template <> struct formatter<scaled_value> : formatter<int> {
+  auto format(scaled_value v, format_context& ctx) const
+      -> format_context::iterator {
+    return formatter<int>::format(v.value * 10, ctx);
+  }
+};
+FMT_END_NAMESPACE
+
+TEST(ranges_test, stable_map_keeps_distinct_keys_with_same_text) {
+  // Two keys that format to the same text but are not equal are both kept.
+  auto m = std::unordered_map<aliased_key, int, aliased_key_hash>{
+      {{1, "dup"}, 10}, {{2, "dup"}, 20}};
+  auto by_id = [](const aliased_key& a, const aliased_key& b) {
+    return a.id < b.id;
+  };
+  EXPECT_EQ(fmt::format("{}", fmt::stable_map(m, by_id)),
+            "{\"dup\": 10, \"dup\": 20}");
+}
+
+TEST(ranges_test, stable_map_snapshot_is_independent) {
+  auto m = std::unordered_map<std::string, int>{{"one", 1}, {"two", 2}};
+  auto snapshot = fmt::stable_map(m, std::less<std::string>());
+  auto report = fmt::format("{}", snapshot);
+  // Later modifications of the original map do not affect the snapshot.
+  m.clear();
+  m["three"] = 3;
+  EXPECT_EQ(fmt::format("{}", snapshot), report);
+  EXPECT_EQ(report, "{\"one\": 1, \"two\": 2}");
+}
+
+TEST(ranges_test, stable_map_custom_value_formatter) {
+  auto m = std::unordered_map<int, scaled_value>{{2, {2}}, {1, {1}}};
+  EXPECT_EQ(fmt::format("{}", fmt::stable_map(m, std::less<int>())),
+            "{1: 10, 2: 20}");
+}
+
+TEST(ranges_test, stable_map_throwing_comparator) {
+  auto m = std::unordered_map<int, int>{{1, 1}, {2, 2}, {3, 3}};
+  auto throwing = [](int, int) -> bool { throw std::runtime_error("cmp"); };
+  // A throwing comparator fails the whole call; no partial wrapper is
+  // returned.
+  EXPECT_THROW(fmt::stable_map(m, throwing), std::runtime_error);
 }
 
 TEST(ranges_test, format_set) {
