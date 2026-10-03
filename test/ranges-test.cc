@@ -12,7 +12,9 @@
 #include <map>
 #include <queue>
 #include <set>
+#include <sstream>
 #include <stack>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -883,4 +885,141 @@ template <> struct formatter<test_adaptor> : formatter<string_view> {
 
 TEST(ranges_test, container_adaptor_opt_out) {
   EXPECT_EQ(fmt::format("{}", test_adaptor()), "test");
+}
+
+// A single-pass input range that counts how many elements have been pulled
+// from it (the construction of begin() plus each increment pulls one
+// element, mirroring std::istream_iterator semantics).
+template <typename T>
+class counted_input_range {
+ public:
+  explicit counted_input_range(std::initializer_list<T> values)
+      : values_(values) {}
+
+  class iterator {
+   public:
+    using iterator_category = std::input_iterator_tag;
+    using value_type = T;
+    using difference_type = std::ptrdiff_t;
+
+    iterator() = default;
+    explicit iterator(counted_input_range* r) : range_(r) { pull(); }
+
+    auto operator*() const -> const T& { return range_->values_[index_ - 1]; }
+    auto operator++() -> iterator& {
+      pull();
+      return *this;
+    }
+    void operator++(int) { pull(); }
+    friend auto operator==(const iterator& a, const iterator& b) -> bool {
+      return a.range_ == b.range_;
+    }
+    friend auto operator!=(const iterator& a, const iterator& b) -> bool {
+      return !(a == b);
+    }
+
+   private:
+    void pull() {
+      ++range_->pulls;
+      if (index_ < range_->values_.size())
+        ++index_;
+      else
+        range_ = nullptr;
+    }
+
+    counted_input_range* range_ = nullptr;
+    size_t index_ = 0;  // One past the current element.
+  };
+
+  auto begin() -> iterator { return iterator(this); }
+  auto end() -> iterator { return {}; }
+
+  int pulls = 0;
+
+ private:
+  std::vector<T> values_;
+};
+
+TEST(ranges_test, preview_range_input_reads_at_most_limit_plus_probe) {
+  auto r = counted_input_range<int>{1, 2, 3, 4, 5};
+  EXPECT_EQ(fmt::format("{}", fmt::preview_range(r, 2)),
+            "[1, 2, ...] (total: unknown)");
+  // Two formatted elements plus one probe element, and no more.
+  EXPECT_EQ(r.pulls, 3);
+}
+
+TEST(ranges_test, preview_range_zero_limit_distinguishes_empty) {
+  auto empty = counted_input_range<int>{};
+  EXPECT_EQ(fmt::format("{}", fmt::preview_range(empty, 0)), "[] (total: 0)");
+  EXPECT_EQ(empty.pulls, 1);
+
+  auto nonempty = counted_input_range<int>{1, 2, 3};
+  EXPECT_EQ(fmt::format("{}", fmt::preview_range(nonempty, 0)),
+            "[...] (total: unknown)");
+  EXPECT_EQ(nonempty.pulls, 1);
+}
+
+TEST(ranges_test, preview_range_sized) {
+  auto v = std::vector<int>{1, 2, 3, 4, 5};
+  EXPECT_EQ(fmt::format("{}", fmt::preview_range(v, 2)),
+            "[1, 2, ...] (total: 5)");
+  EXPECT_EQ(fmt::format("{}", fmt::preview_range(v, 10)),
+            "[1, 2, 3, 4, 5] (total: 5)");
+  EXPECT_EQ(fmt::format("{}", fmt::preview_range(v, 0)), "[...] (total: 5)");
+  const auto w = std::vector<int>{1, 2, 3};
+  EXPECT_EQ(fmt::format("{}", fmt::preview_range(w, 2)),
+            "[1, 2, ...] (total: 3)");
+  // Normal range formatting is unaffected.
+  EXPECT_EQ(fmt::format("{}", v), "[1, 2, 3, 4, 5]");
+}
+
+TEST(ranges_test, preview_range_string_escaping) {
+  auto v = std::vector<std::string>{"a\nb", "c\"d", "e"};
+  EXPECT_EQ(fmt::format("{}", fmt::preview_range(v, 2)),
+            "[\"a\\nb\", \"c\\\"d\", ...] (total: 3)");
+}
+
+TEST(ranges_test, preview_range_move_only_single_pass) {
+  EXPECT_EQ(fmt::format("{}", fmt::preview_range(movable_iter_range{}, 2)),
+            "[1, 2, ...] (total: unknown)");
+}
+
+struct throw_on_three {
+  int value;
+};
+
+static int throw_on_three_format_count = 0;
+
+namespace fmt {
+template <> struct formatter<throw_on_three> : formatter<int> {
+  auto format(throw_on_three t, format_context& ctx) const
+      -> format_context::iterator {
+    if (t.value == 3) throw std::runtime_error("format failed");
+    ++throw_on_three_format_count;
+    return formatter<int>::format(t.value, ctx);
+  }
+};
+}  // namespace fmt
+
+TEST(ranges_test, preview_range_format_exception_stops_consumption) {
+  throw_on_three_format_count = 0;
+  auto r =
+      counted_input_range<throw_on_three>{{1}, {2}, {3}, {4}, {5}};
+  try {
+    auto output = fmt::format("{}", fmt::preview_range(r, 5));
+    FAIL() << "expected an exception, got " << output;
+  } catch (const std::runtime_error& e) {
+    EXPECT_EQ(std::string(e.what()), "format failed");
+  }
+  // Formatting stopped at the third element and did not consume more.
+  EXPECT_EQ(throw_on_three_format_count, 2);
+  EXPECT_EQ(r.pulls, 3);
+}
+
+TEST(ranges_test, preview_range_formats_each_kept_element_once) {
+  throw_on_three_format_count = 0;
+  auto r = counted_input_range<throw_on_three>{{1}, {2}};
+  EXPECT_EQ(fmt::format("{}", fmt::preview_range(r, 10)), "[1, 2] (total: 2)");
+  EXPECT_EQ(throw_on_three_format_count, 2);
+  EXPECT_EQ(r.pulls, 3);
 }

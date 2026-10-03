@@ -842,6 +842,132 @@ struct formatter<
   }
 };
 
+namespace detail {
+
+// Sentinel returned by preview_known_size when the number of elements in a
+// range cannot be determined without consuming elements.
+constexpr size_t preview_size_unknown = size_t(-1);
+
+// Returns the number of elements in `r` if it is known without consuming
+// any elements (e.g. from `r.size()`), or `preview_size_unknown` otherwise.
+template <typename R>
+auto preview_known_size(const R& r, int) -> decltype(size_t(r.size())) {
+  return size_t(r.size());
+}
+template <typename T, size_t N>
+auto preview_known_size(const T (&)[N], int) -> size_t {
+  return N;
+}
+template <typename R> auto preview_known_size(const R&, ...) -> size_t {
+  return preview_size_unknown;
+}
+
+// A view of a range that formats at most a bounded number of its leading
+// elements. R is either a reference type (the view borrows the range) or a
+// value type (the view owns the range), which allows single-pass input
+// ranges to be previewed without collecting their elements first.
+template <typename R> class preview_view {
+ private:
+  R range_;
+  size_t max_items_;
+
+ public:
+  FMT_CONSTEXPR preview_view(R&& r, size_t max_items)
+      : range_(static_cast<R&&>(r)), max_items_(max_items) {}
+
+  FMT_CONSTEXPR auto range() -> R& { return range_; }
+  FMT_CONSTEXPR auto max_items() const -> size_t { return max_items_; }
+};
+}  // namespace detail
+
+template <typename R, typename Char>
+struct formatter<detail::preview_view<R>, Char> {
+ private:
+  using range_ref = conditional_t<std::is_reference<R>::value, R, R&>;
+  using value_type = remove_cvref_t<decltype(*detail::range_begin(
+      std::declval<range_ref>()))>;
+  detail::range_formatter_type<Char, value_type> underlying_;
+
+ public:
+  FMT_CONSTEXPR auto parse(parse_context<Char>& ctx) -> const Char* {
+    auto it = ctx.begin();
+    detail::maybe_set_debug_format(underlying_, true);
+    if (it != ctx.end() && *it != '}')
+      report_error("invalid format specifier");
+    return it;
+  }
+
+  template <typename FormatContext>
+  auto format(detail::preview_view<R>& v, FormatContext& ctx) const
+      -> decltype(ctx.out()) {
+    auto out = ctx.out();
+    auto&& range = v.range();
+    size_t max_items = v.max_items();
+
+    size_t known = detail::preview_known_size(range, 0);
+    bool total_known = known != detail::preview_size_unknown;
+    size_t total = total_known ? known : 0;
+
+    auto separator =
+        basic_string_view<Char>(detail::string_literal<Char, ',', ' '>{});
+    out = detail::copy<Char>(
+        basic_string_view<Char>(detail::string_literal<Char, '['>{}), out);
+    auto it = detail::range_begin(range);
+    auto end = detail::range_end(range);
+    size_t count = 0;
+    // Format at most max_items elements, pulling each element from the
+    // range only when it is about to be formatted, so each kept element is
+    // formatted exactly once. If formatting an element throws, the
+    // exception propagates and no more elements are consumed.
+    for (; count < max_items && it != end; ++it) {
+      if (count > 0) out = detail::copy<Char>(separator, out);
+      ctx.advance_to(out);
+      auto&& item = *it;
+      out = underlying_.format(item, ctx);
+      ++count;
+    }
+    bool truncated = false;
+    if (total_known) {
+      truncated = total > count;
+    } else if (count == max_items && it != end) {
+      // The probe shows at least one more element, but the total length of
+      // a single-pass range cannot be deduced from it, so it stays unknown.
+      truncated = true;
+    } else {
+      // The range was exhausted, so the number of elements shown is the
+      // exact total.
+      total = count;
+      total_known = true;
+    }
+    if (truncated) {
+      if (count > 0) out = detail::copy<Char>(separator, out);
+      out = detail::copy<Char>(
+          basic_string_view<Char>(
+              detail::string_literal<Char, '.', '.', '.'>{}),
+          out);
+    }
+    out = detail::copy<Char>(
+        basic_string_view<Char>(detail::string_literal<Char, ']'>{}), out);
+    out = detail::copy<Char>(
+        basic_string_view<Char>(
+            detail::string_literal<Char, ' ', '(', 't', 'o', 't', 'a', 'l',
+                                   ':', ' '>{}),
+        out);
+    if (total_known) {
+      out = detail::write<Char>(out, total);
+    } else {
+      out = detail::copy<Char>(
+          basic_string_view<Char>(
+              detail::string_literal<Char, 'u', 'n', 'k', 'n', 'o', 'w',
+                                     'n'>{}),
+          out);
+    }
+    out = detail::copy<Char>(
+        basic_string_view<Char>(detail::string_literal<Char, ')'>{}), out);
+    return out;
+  }
+};
+
 FMT_BEGIN_EXPORT
 
 /// Returns a view that formats the iterator range `[begin, end)` with elements
@@ -900,6 +1026,38 @@ template <typename T>
 FMT_DEPRECATED auto join(std::initializer_list<T> list, string_view sep)
     -> join_view<const T*, const T*> {
   return join(std::begin(list), std::end(list), sep);
+}
+
+/**
+ * Returns a view that formats at most `max_items` leading elements of
+ * `range`, reading at most `max_items + 1` elements from it (the extra
+ * element is a probe used only to detect truncation).
+ *
+ * Unlike formatting a range directly, `fmt::preview_range` works with
+ * single-pass input ranges and never collects the elements first. If the
+ * range holds more than `max_items` elements, a `...` marker is appended.
+ * The total is reported when it is known without consuming elements (e.g.
+ * from `range.size()`) or when the whole range fits in the preview, and is
+ * reported as `unknown` otherwise.
+ *
+ * **Example**:
+ *
+ *     auto v = std::vector<int>{1, 2, 3, 4, 5};
+ *     fmt::print("{}", fmt::preview_range(v, 2));
+ *     // Output: [1, 2, ...] (total: 5)
+ */
+template <typename Range>
+FMT_CONSTEXPR auto preview_range(Range& r, size_t max_items)
+    -> detail::preview_view<Range&> {
+  return {r, max_items};
+}
+
+/// An overload of `preview_range` for rvalue ranges which takes ownership
+/// of the range, allowing move-only single-pass ranges to be previewed.
+template <typename Range, FMT_ENABLE_IF(!std::is_reference<Range>::value)>
+FMT_CONSTEXPR auto preview_range(Range&& r, size_t max_items)
+    -> detail::preview_view<remove_cvref_t<Range>> {
+  return {static_cast<Range&&>(r), max_items};
 }
 
 FMT_END_EXPORT
