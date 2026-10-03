@@ -9,11 +9,14 @@
 #define FMT_RANGES_H_
 
 #ifndef FMT_MODULE
+#  include <algorithm>
+#  include <functional>
 #  include <initializer_list>
 #  include <iterator>
 #  include <tuple>
 #  include <type_traits>
 #  include <utility>
+#  include <vector>
 #endif
 
 #include "format.h"
@@ -264,10 +267,11 @@ using range_format_constant = std::integral_constant<range_format, K>;
 // These are not generic lambdas for compatibility with C++11.
 template <typename Char> struct parse_empty_specs {
   template <typename Formatter> FMT_CONSTEXPR void operator()(Formatter& f) {
-    f.parse(ctx);
+    end = f.parse(ctx);
     detail::maybe_set_debug_format(f, true);
   }
   parse_context<Char>& ctx;
+  const Char* end = nullptr;
 };
 template <typename FormatContext> struct format_tuple_element {
   using char_type = typename FormatContext::char_type;
@@ -619,6 +623,132 @@ struct formatter<
     int i = 0;
     basic_string_view<Char> sep = detail::string_literal<Char, ',', ' '>{};
     for (auto&& value : map) {
+      if (i > 0) out = detail::copy<Char>(sep, out);
+      ctx.advance_to(out);
+      detail::for_each2(formatters_, value,
+                        detail::format_tuple_element<FormatContext>{
+                            0, ctx, detail::string_literal<Char, ':', ' '>{}});
+      ++i;
+    }
+    basic_string_view<Char> close = detail::string_literal<Char, '}'>{};
+    if (!no_delimiters_) out = detail::copy<Char>(close, out);
+    return out;
+  }
+};
+
+/**
+ * A stable, order-independent view of an associative container such as
+ * `std::unordered_map`.
+ *
+ * `stable_map` copies every key/value pair of the source container into an
+ * independent snapshot at construction time and sorts the snapshot by key
+ * using the caller-supplied comparator (`std::less<Key>` by default). The
+ * source container is never referenced afterwards: modifying or destroying
+ * the source container has no effect on a `stable_map` that was already
+ * created, so reports produced from it remain fixed even when the source
+ * container changes.
+ *
+ * Sorting compares keys with the supplied comparator only; it never merges
+ * or deduplicates elements. Two keys that compare equivalent (or that simply
+ * happen to format to the same text) are both kept. If the comparator throws
+ * while the snapshot is being sorted, the exception propagates out of the
+ * constructor and no `stable_map` object is produced.
+ *
+ * Formatting reuses the same key/value formatters as the map formatter,
+ * including debug quoting and escaping of string keys and values. Format
+ * specifiers are interpreted the same way as for maps:
+ *
+ *     auto m = std::unordered_map<std::string, int>{{"b", 2}, {"a", 1}};
+ *     fmt::print("{}", fmt::stable_map<std::string, int>(m));
+ *     // Output: {"a": 1, "b": 2}
+ *
+ * `stable_map` is not itself a range and is only formattable through its own
+ * formatter; the regular map formatter is left unchanged.
+ */
+FMT_EXPORT
+template <typename Key, typename T, typename Compare = std::less<Key>>
+class stable_map {
+ public:
+  using key_type = Key;
+  using mapped_type = T;
+  using value_type = std::pair<Key, T>;
+  using size_type = std::size_t;
+  using key_compare = Compare;
+
+  /// Copies the elements of `range` into a snapshot and sorts it by key.
+  template <typename Range>
+  explicit stable_map(const Range& range, Compare comp = Compare())
+      : comp_(std::move(comp)) {
+    for (auto&& value : range)
+      data_.emplace_back(value.first, value.second);
+    std::sort(data_.begin(), data_.end(),
+              [this](const value_type& a, const value_type& b) {
+                return comp_(a.first, b.first);
+              });
+  }
+
+  auto size() const -> size_type { return data_.size(); }
+  auto empty() const -> bool { return data_.empty(); }
+  auto key_comp() const -> const key_compare& { return comp_; }
+
+ private:
+  template <typename, typename, typename> friend struct formatter;
+
+  std::vector<value_type> data_;
+  key_compare comp_;
+};
+
+template <typename Key, typename T, typename Compare, typename Char>
+struct formatter<stable_map<Key, T, Compare>, Char> {
+ private:
+  using map_type = stable_map<Key, T, Compare>;
+  using element_type = typename map_type::value_type;
+
+  decltype(detail::tuple::get_formatters<element_type, Char>(
+      detail::tuple_index_sequence<element_type>())) formatters_;
+  bool no_delimiters_ = false;
+  detail::nested_format_specs<Char> specs_;
+
+  friend class detail::nested_format_specs<Char>;
+
+ public:
+  FMT_CONSTEXPR formatter() {}
+
+  FMT_CONSTEXPR auto parse(parse_context<Char>& ctx) -> const Char* {
+    auto it = ctx.begin();
+    auto end = ctx.end();
+    if (it != end) {
+      it = specs_.parse(it, end, ctx, ':');
+      if (it != end && detail::to_ascii(*it) == 'n') {
+        no_delimiters_ = true;
+        ++it;
+      }
+      if (it != end && *it != '}') {
+        if (*it != ':') report_error("invalid format specifier");
+        ++it;
+      }
+      ctx.advance_to(it);
+    }
+    detail::parse_empty_specs<Char> parse{ctx};
+    detail::for_each(formatters_, parse);
+    return parse.end;
+  }
+
+  template <typename FormatContext>
+  auto format(const map_type& map, FormatContext& ctx) const
+      -> decltype(ctx.out()) {
+    return specs_.write(ctx, *this, map);
+  }
+
+  template <typename FormatContext>
+  auto write_body(FormatContext& ctx, const map_type& map) const
+      -> decltype(ctx.out()) {
+    auto out = ctx.out();
+    basic_string_view<Char> open = detail::string_literal<Char, '{'>{};
+    if (!no_delimiters_) out = detail::copy<Char>(open, out);
+    int i = 0;
+    basic_string_view<Char> sep = detail::string_literal<Char, ',', ' '>{};
+    for (const auto& value : map.data_) {
       if (i > 0) out = detail::copy<Char>(sep, out);
       ctx.advance_to(out);
       detail::for_each2(formatters_, value,

@@ -14,6 +14,7 @@
 #include <set>
 #include <stack>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -883,4 +884,133 @@ template <> struct formatter<test_adaptor> : formatter<string_view> {
 
 TEST(ranges_test, container_adaptor_opt_out) {
   EXPECT_EQ(fmt::format("{}", test_adaptor()), "test");
+}
+
+// A key whose formatter prints only part of its state, so two distinct keys
+// can format to the same text while remaining different keys.
+struct stable_map_key {
+  int id;
+  std::string label;
+};
+
+struct stable_map_key_hash {
+  auto operator()(const stable_map_key& k) const -> std::size_t {
+    return std::hash<int>{}(k.id);
+  }
+};
+
+struct stable_map_key_eq {
+  auto operator()(const stable_map_key& a, const stable_map_key& b) const
+      -> bool {
+    return a.id == b.id;
+  }
+};
+
+struct stable_map_key_compare {
+  auto operator()(const stable_map_key& a, const stable_map_key& b) const
+      -> bool {
+    return a.id < b.id;
+  }
+};
+
+FMT_BEGIN_NAMESPACE
+template <>
+struct formatter<stable_map_key> : formatter<string_view> {
+  auto format(const stable_map_key& k, format_context& ctx) const
+      -> format_context::iterator {
+    return formatter<string_view>::format(k.label, ctx);
+  }
+};
+FMT_END_NAMESPACE
+
+// A value with a custom formatter.
+struct stable_map_value {
+  int n;
+};
+
+FMT_BEGIN_NAMESPACE
+template <>
+struct formatter<stable_map_value> : formatter<string_view> {
+  auto format(const stable_map_value& v, format_context& ctx) const
+      -> format_context::iterator {
+    return formatter<string_view>::format("v" + std::to_string(v.n), ctx);
+  }
+};
+FMT_END_NAMESPACE
+
+struct stable_map_throwing_compare {
+  auto operator()(const std::string&, const std::string&) const -> bool {
+    throw std::runtime_error("comparator failure");
+  }
+};
+
+TEST(ranges_test, stable_map_unordered) {
+  auto m1 = std::unordered_map<std::string, int>{
+      {"one", 1}, {"two", 2}, {"three", 3}};
+  auto m2 = std::unordered_map<std::string, int>{
+      {"three", 3}, {"one", 1}, {"two", 2}};
+  auto s1 = fmt::stable_map<std::string, int>(m1);
+  auto s2 = fmt::stable_map<std::string, int>(m2);
+  EXPECT_EQ(fmt::format("{}", s1), fmt::format("{}", s2));
+  EXPECT_EQ(fmt::format("{}", s1),
+            "{\"one\": 1, \"three\": 3, \"two\": 2}");
+}
+
+TEST(ranges_test, stable_map_format_specs) {
+  auto m = std::unordered_map<std::string, int>{{"b", 2}, {"a", 1}};
+  auto s = fmt::stable_map<std::string, int>(m);
+  EXPECT_EQ(fmt::format("{:n}", s), "\"a\": 1, \"b\": 2");
+}
+
+TEST(ranges_test, stable_map_hex_specs) {
+  auto m = std::unordered_map<int, int>{{2, 20}, {1, 10}};
+  auto s = fmt::stable_map<int, int>(m);
+  EXPECT_EQ(fmt::format("{::#x}", s), "{0x1: 0xa, 0x2: 0x14}");
+  EXPECT_EQ(fmt::format("{:n:#x}", s), "0x1: 0xa, 0x2: 0x14");
+}
+
+TEST(ranges_test, stable_map_escaped_keys) {
+  auto m = std::unordered_map<std::string, int>{{"a\"b\nc", 1}};
+  auto s = fmt::stable_map<std::string, int>(m);
+  EXPECT_EQ(fmt::format("{}", s), "{\"a\\\"b\\nc\": 1}");
+}
+
+TEST(ranges_test, stable_map_same_text_distinct_keys) {
+  auto m = std::unordered_map<stable_map_key, int, stable_map_key_hash,
+                              stable_map_key_eq>();
+  m.emplace(stable_map_key{1, "same"}, 10);
+  m.emplace(stable_map_key{2, "same"}, 20);
+  auto s = fmt::stable_map<stable_map_key, int, stable_map_key_compare>(m);
+  EXPECT_EQ(fmt::format("{}", s), "{\"same\": 10, \"same\": 20}");
+}
+
+TEST(ranges_test, stable_map_custom_value_formatter) {
+  auto m = std::unordered_map<int, stable_map_value>{{2, {2}}, {1, {1}}};
+  auto s = fmt::stable_map<int, stable_map_value>(m);
+  EXPECT_EQ(fmt::format("{}", s), "{1: \"v1\", 2: \"v2\"}");
+}
+
+TEST(ranges_test, stable_map_snapshot) {
+  auto m = std::unordered_map<std::string, int>{{"a", 1}};
+  auto s = fmt::stable_map<std::string, int>(m);
+  auto before = fmt::format("{}", s);
+  m.emplace("b", 2);
+  m["a"] = 99;
+  auto after = fmt::format("{}", s);
+  EXPECT_EQ(before, after);
+  EXPECT_EQ(after, "{\"a\": 1}");
+}
+
+TEST(ranges_test, stable_map_compare_failure) {
+  auto m = std::unordered_map<std::string, int>{{"a", 1}, {"b", 2}};
+  try {
+    fmt::stable_map<std::string, int, stable_map_throwing_compare> s(m);
+    FAIL() << "expected comparator exception";
+  } catch (const std::runtime_error& e) {
+    EXPECT_STREQ(e.what(), "comparator failure");
+  }
+  // The source container is untouched and no partial wrapper was returned.
+  EXPECT_EQ(m.size(), 2u);
+  auto ok = fmt::stable_map<std::string, int>(m);
+  EXPECT_EQ(ok.size(), 2u);
 }
