@@ -13,6 +13,7 @@
 #include <queue>
 #include <set>
 #include <stack>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -883,4 +884,181 @@ template <> struct formatter<test_adaptor> : formatter<string_view> {
 
 TEST(ranges_test, container_adaptor_opt_out) {
   EXPECT_EQ(fmt::format("{}", test_adaptor()), "test");
+}
+
+// A single-pass counting input range: yields 0, 1, 2, ... up to size items.
+// It does NOT expose size(), so its total is unknown.
+class counting_range {
+ public:
+  class iterator {
+   public:
+    using iterator_category = std::input_iterator_tag;
+    using value_type = int;
+    using difference_type = std::ptrdiff_t;
+    using pointer = const int*;
+    using reference = int;
+
+    iterator() : cur_(0), end_(0), reads_(nullptr) {}
+    iterator(size_t c, size_t e, size_t* reads)
+        : cur_(c), end_(e), reads_(reads) {}
+
+    auto operator*() const -> int { return static_cast<int>(cur_); }
+    auto operator++() -> iterator& {
+      ++cur_;
+      if (reads_) ++(*reads_);
+      return *this;
+    }
+    auto operator++(int) -> iterator {
+      iterator tmp = *this;
+      ++(*this);
+      return tmp;
+    }
+    auto operator==(const iterator& other) const -> bool {
+      return cur_ == other.cur_;
+    }
+    auto operator!=(const iterator& other) const -> bool {
+      return cur_ != other.cur_;
+    }
+
+   private:
+    size_t cur_;
+    size_t end_;
+    size_t* reads_;
+  };
+
+  counting_range(size_t size, size_t* reads) : size_(size), reads_(reads) {}
+
+  auto begin() -> iterator { return iterator(0, size_, reads_); }
+  auto end() -> iterator { return iterator(size_, size_, reads_); }
+
+ private:
+  size_t size_;
+  size_t* reads_;
+};
+
+// A one-shot iterator that throws when formatting a specific value.
+class throwing_range {
+ public:
+  class iterator {
+   public:
+    using iterator_category = std::input_iterator_tag;
+    using value_type = int;
+    using difference_type = std::ptrdiff_t;
+    using pointer = const int*;
+    using reference = int;
+
+    iterator() : cur_(0), throw_at_(0), consumed_(nullptr) {}
+    iterator(size_t c, size_t t, size_t* cons)
+        : cur_(c), throw_at_(t), consumed_(cons) {}
+
+    auto operator*() const -> int {
+      if (cur_ == throw_at_) throw std::runtime_error("boom");
+      return static_cast<int>(cur_);
+    }
+    auto operator++() -> iterator& {
+      ++cur_;
+      if (consumed_) ++(*consumed_);
+      return *this;
+    }
+    auto operator++(int) -> iterator {
+      iterator tmp = *this;
+      ++(*this);
+      return tmp;
+    }
+    auto operator==(const iterator& other) const -> bool {
+      return cur_ == other.cur_;
+    }
+    auto operator!=(const iterator& other) const -> bool {
+      return cur_ != other.cur_;
+    }
+
+   private:
+    size_t cur_;
+    size_t throw_at_;
+    size_t* consumed_;
+  };
+
+  throwing_range(size_t size, size_t throw_at, size_t* consumed)
+      : size_(size), throw_at_(throw_at), consumed_(consumed) {}
+
+  auto begin() -> iterator { return iterator(0, throw_at_, consumed_); }
+  auto end() -> iterator { return iterator(size_, throw_at_, consumed_); }
+
+ private:
+  size_t size_;
+  size_t throw_at_;
+  size_t* consumed_;
+};
+
+TEST(ranges_test, preview_range_basic) {
+  auto v = std::vector<int>{0, 1, 2, 3, 4};
+  EXPECT_EQ(fmt::format("{}", fmt::preview_range(v, 2)), "[0, 1, ...(5)]");
+  EXPECT_EQ(fmt::format("{}", fmt::preview_range(v, 5)), "[0, 1, 2, 3, 4]");
+  EXPECT_EQ(fmt::format("{}", fmt::preview_range(v, 10)), "[0, 1, 2, 3, 4]");
+}
+
+TEST(ranges_test, preview_range_empty) {
+  auto v = std::vector<int>{};
+  EXPECT_EQ(fmt::format("{}", fmt::preview_range(v, 2)), "[]");
+  EXPECT_EQ(fmt::format("{}", fmt::preview_range(v, 0)), "[]");
+}
+
+TEST(ranges_test, preview_range_max_items_zero) {
+  auto v = std::vector<int>{0, 1, 2};
+  EXPECT_EQ(fmt::format("{}", fmt::preview_range(v, 0)), "[...(3)]");
+}
+
+TEST(ranges_test, preview_range_unknown_total) {
+  size_t reads = 0;
+  auto r = counting_range(5, &reads);
+  EXPECT_EQ(fmt::format("{}", fmt::preview_range(r, 2)),
+            "[0, 1, ...(unknown)]");
+  // At most max_items + 1 items are read: 2 formatted + 1 probe.
+  EXPECT_EQ(reads, 3);
+}
+
+TEST(ranges_test, preview_range_one_shot_iterator) {
+  // A single-pass input iterator is traversed in a single pass; elements are
+  // never collected into a container.
+  size_t reads = 0;
+  auto r = counting_range(4, &reads);
+  EXPECT_EQ(fmt::format("{}", fmt::preview_range(r, 3)),
+            "[0, 1, 2, ...(unknown)]");
+  EXPECT_EQ(reads, 4);  // 3 formatted + 1 probe
+  // A second traversal is a fresh single pass (the range regenerates).
+  EXPECT_EQ(fmt::format("{}", fmt::preview_range(r, 3)),
+            "[0, 1, 2, ...(unknown)]");
+  EXPECT_EQ(reads, 8);
+}
+
+TEST(ranges_test, preview_range_string_escape) {
+  auto v = std::vector<std::string>{"a\nb", "c\td", "e"};
+  EXPECT_EQ(fmt::format("{}", fmt::preview_range(v, 2)),
+            "[\"a\\nb\", \"c\\td\", ...(3)]");
+}
+
+TEST(ranges_test, preview_range_exception_stops_consumption) {
+  size_t consumed = 0;
+  auto r = throwing_range(5, 2, &consumed);
+  EXPECT_THROW((void)fmt::format("{}", fmt::preview_range(r, 5)),
+               std::runtime_error);
+  // Formatting exception stops consumption: only values 0 and 1 are consumed.
+  EXPECT_EQ(consumed, 2);
+}
+
+TEST(ranges_test, preview_range_iterator_pair) {
+  auto v = std::vector<int>{0, 1, 2, 3};
+  EXPECT_EQ(fmt::format("{}", fmt::preview_range(v.begin(), v.end(), 2)),
+            "[0, 1, ...(4)]");
+  size_t reads = 0;
+  auto r = counting_range(4, &reads);
+  EXPECT_EQ(fmt::format("{}", fmt::preview_range(r.begin(), r.end(), 2)),
+            "[0, 1, ...(unknown)]");
+  EXPECT_EQ(reads, 3);
+}
+
+TEST(ranges_test, preview_range_element_specs) {
+  auto v = std::vector<int>{1, 2, 3, 4};
+  EXPECT_EQ(fmt::format("{:02}", fmt::preview_range(v, 2)),
+            "[01, 02, ...(4)]");
 }

@@ -720,6 +720,146 @@ struct formatter<join_view<It, Sentinel, Char>, Char> {
   }
 };
 
+namespace detail {
+
+// Information about the total number of elements in a range, if known.
+//
+// A range only exposes its size if it has a `size()` member (or is a bounded
+// array). Single-pass input ranges (e.g. counting ranges produced on the fly)
+// do not expose their size, so their total is reported as unknown. We never
+// fabricate the total from a single probe item.
+template <typename R, typename Enable = void>
+struct preview_size_info {
+  static constexpr bool has_size = false;
+  static FMT_CONSTEXPR auto get(const R&) -> size_t { return 0; }
+};
+
+template <typename R>
+struct preview_size_info<R, void_t<decltype(std::declval<R&>().size())>> {
+  static constexpr bool has_size = true;
+  static FMT_CONSTEXPR auto get(const R& r) -> size_t {
+    return static_cast<size_t>(r.size());
+  }
+};
+
+// Bounded arrays expose their size.
+template <typename T, size_t N>
+struct preview_size_info<T[N], void> {
+  static constexpr bool has_size = true;
+  static FMT_CONSTEXPR auto get(const T (&)[N]) -> size_t { return N; }
+};
+
+// Information about the total number of elements in an iterator range, if it
+// can be computed (i.e. the iterators support subtraction).
+template <typename It, typename Sentinel, typename Enable = void>
+struct preview_iter_size_info : std::false_type {};
+
+template <typename It, typename Sentinel>
+struct preview_iter_size_info<
+    It, Sentinel,
+    void_t<decltype(std::declval<Sentinel>() - std::declval<It>())>>
+    : std::true_type {};
+
+// Compute the total for random-access iterators only. For other iterators the
+// total is unknown (0) and never reported.
+template <typename It, typename Sentinel>
+FMT_CONSTEXPR auto preview_iter_size(It begin, Sentinel end,
+                                     std::true_type) -> size_t {
+  return static_cast<size_t>(end - begin);
+}
+template <typename It, typename Sentinel>
+FMT_CONSTEXPR auto preview_iter_size(It, Sentinel,
+                                     std::false_type) -> size_t {
+  return 0;
+}
+
+}  // namespace detail
+
+template <typename It, typename Sentinel, typename Char = char>
+struct preview_view : detail::view {
+  It begin;
+  Sentinel end;
+  size_t max_items;
+  size_t total;
+  bool has_total;
+
+  FMT_CONSTEXPR preview_view(It b, Sentinel e, size_t max, size_t t, bool ht)
+      : begin(std::move(b)),
+        end(e),
+        max_items(max),
+        total(t),
+        has_total(ht) {}
+};
+
+template <typename It, typename Sentinel, typename Char>
+struct formatter<preview_view<It, Sentinel, Char>, Char> {
+ private:
+  using value_type =
+#ifdef __cpp_lib_ranges
+      std::iter_value_t<It>;
+#else
+      typename std::iterator_traits<It>::value_type;
+#endif
+  formatter<remove_cvref_t<value_type>, Char> value_formatter_;
+
+  using view = conditional_t<std::is_copy_constructible<It>::value,
+                             const preview_view<It, Sentinel, Char>,
+                             preview_view<It, Sentinel, Char>>;
+
+ public:
+  using nonlocking = void;
+
+  FMT_CONSTEXPR auto parse(parse_context<Char>& ctx) -> const Char* {
+    // Quote and escape string elements, matching the range formatter.
+    detail::maybe_set_debug_format(value_formatter_, true);
+    return value_formatter_.parse(ctx);
+  }
+
+  template <typename FormatContext>
+  FMT_CONSTEXPR auto format(view& value, FormatContext& ctx) const
+      -> decltype(ctx.out()) {
+    auto out = ctx.out();
+    auto it = value.begin;
+    basic_string_view<Char> opening = detail::string_literal<Char, '['>{};
+    basic_string_view<Char> closing = detail::string_literal<Char, ']'>{};
+    basic_string_view<Char> separator = detail::string_literal<Char, ',', ' '>{};
+    basic_string_view<Char> ellipsis =
+        detail::string_literal<Char, '.', '.', '.'>{};
+    basic_string_view<Char> open_paren = detail::string_literal<Char, '('>{};
+    basic_string_view<Char> close_paren = detail::string_literal<Char, ')'>{};
+    basic_string_view<Char> unknown =
+        detail::string_literal<Char, 'u', 'n', 'k', 'n', 'o', 'w', 'n'>{};
+    out = detail::copy<Char>(opening, out);
+    size_t count = 0;
+    // Format at most max_items elements, each exactly once.
+    while (count < value.max_items && it != value.end) {
+      if (count > 0) out = detail::copy<Char>(separator, out);
+      ctx.advance_to(out);
+      out = value_formatter_.format(*it, ctx);
+      // If formatting throws we must not consume any more of the source.
+      ++it;
+      ++count;
+    }
+    // Probe a single additional item to detect truncation. We never read past
+    // this one probe and never infer the total from it.
+    if (it != value.end) {
+      ++it;  // consume the probe item
+      if (count > 0) out = detail::copy<Char>(separator, out);
+      ctx.advance_to(out);
+      out = detail::copy<Char>(ellipsis, out);
+      out = detail::copy<Char>(open_paren, out);
+      if (value.has_total) {
+        out = detail::write<Char>(out, value.total);
+      } else {
+        out = detail::copy<Char>(unknown, out);
+      }
+      out = detail::copy<Char>(close_paren, out);
+    }
+    out = detail::copy<Char>(closing, out);
+    return out;
+  }
+};
+
 FMT_EXPORT
 template <typename Tuple, typename Char> struct tuple_join_view : detail::view {
   const Tuple& tuple;
@@ -900,6 +1040,53 @@ template <typename T>
 FMT_DEPRECATED auto join(std::initializer_list<T> list, string_view sep)
     -> join_view<const T*, const T*> {
   return join(std::begin(list), std::end(list), sep);
+}
+
+/**
+ * Returns a view that formats at most `max_items` elements of `range`,
+ * followed by an explicit truncation marker if the range contains more
+ * elements. The total number of elements is reported when known (e.g. for a
+ * sized range); otherwise it is reported as `unknown`. The range is traversed
+ * in a single pass and never collected, so single-pass input ranges are
+ * supported.
+ *
+ * **Example**:
+ *
+ *     auto v = std::vector<int>{1, 2, 3, 4, 5};
+ *     fmt::print("{}", fmt::preview_range(v, 2));
+ *     // Output: [1, 2, ...(5)]
+ *
+ * `fmt::preview_range` applies passed format specifiers to the range elements:
+ *
+ *     fmt::print("{:02}", fmt::preview_range(v, 2));
+ *     // Output: [01, 02, ...(5)]
+ */
+template <typename Range, FMT_ENABLE_IF(!is_tuple_like<Range>::value)>
+FMT_CONSTEXPR auto preview_range(Range&& r, size_t max_items)
+    -> preview_view<decltype(detail::range_begin(r)),
+                    decltype(detail::range_end(r))> {
+  using size_info = detail::preview_size_info<remove_cvref_t<Range>>;
+  size_t total = 0;
+  bool has_total = size_info::has_size;
+  if (has_total) total = size_info::get(r);
+  return {detail::range_begin(r), detail::range_end(r), max_items, total,
+          has_total};
+}
+
+/**
+ * Returns a view that formats at most `max_items` elements of the iterator
+ * range `[begin, end)`, followed by an explicit truncation marker if the range
+ * contains more elements. The total is reported when it can be computed (for
+ * random-access iterators); otherwise it is reported as `unknown`.
+ */
+template <typename It, typename Sentinel>
+FMT_CONSTEXPR auto preview_range(It begin, Sentinel end, size_t max_items)
+    -> preview_view<It, Sentinel> {
+  using size_info = detail::preview_iter_size_info<It, Sentinel>;
+  size_t total = 0;
+  bool has_total = size_info::value;
+  if (has_total) total = detail::preview_iter_size(begin, end, size_info{});
+  return {std::move(begin), std::move(end), max_items, total, has_total};
 }
 
 FMT_END_EXPORT
