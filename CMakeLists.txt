@@ -281,6 +281,7 @@ foreach (
   color.h
   compile.h
   core.h
+  deferred.h
   enum.h
   format.h
   format-inl.h
