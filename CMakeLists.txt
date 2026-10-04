@@ -289,6 +289,7 @@ foreach (
   printf.h
   ranges.h
   std.h
+  ticket.h
   xchar.h)
   set(FMT_HEADERS ${FMT_HEADERS} include/fmt/${header})
 endforeach ()
