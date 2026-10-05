@@ -73,6 +73,7 @@ add_fmt_test(unicode-test HEADER_ONLY)
 if (MSVC)
   target_compile_options(unicode-test PRIVATE /utf-8)
 endif ()
+add_fmt_test(ring-buffer-test)
 add_fmt_test(xchar-test)
 add_fmt_test(enforce-checks-test)
 target_compile_definitions(enforce-checks-test
