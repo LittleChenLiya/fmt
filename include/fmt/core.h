@@ -780,6 +780,7 @@ class basic_specs {
     return (data_ & localized_mask) != 0;
   }
   FMT_CONSTEXPR void set_localized() { data_ |= localized_mask; }
+  FMT_CONSTEXPR void clear_localized() { data_ &= ~localized_mask; }
 
   constexpr auto fill_size() const -> size_t {
     return (data_ & fill_size_mask) >> fill_size_shift;
