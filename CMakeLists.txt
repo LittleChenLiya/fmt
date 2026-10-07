@@ -277,6 +277,7 @@ foreach (
   header
   args.h
   base.h
+  bounded.h
   chrono.h
   color.h
   compile.h

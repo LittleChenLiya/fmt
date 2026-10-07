@@ -131,6 +131,7 @@ extern "C++" {
 // All library-provided declarations and definitions must be in the module
 // purview to be exported.
 #include "fmt/args.h"
+#include "fmt/bounded.h"
 #include "fmt/chrono.h"
 #include "fmt/color.h"
 #include "fmt/compile.h"

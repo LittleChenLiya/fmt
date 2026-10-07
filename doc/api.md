@@ -439,6 +439,32 @@ To force the use of legacy compile-time checks, define the preprocessor
 variable `FMT_ENFORCE_COMPILE_STRING`. When set, functions accepting
 `FMT_STRING` will fail to compile with regular strings.
 
+## Field-Boundary Formatting
+
+`fmt/bounded.h` provides formatting into a fixed-size buffer with a UTF-8
+byte budget that stops at a replacement-field boundary instead of cutting
+the output at an arbitrary byte:
+
+```cpp
+char buf[16];
+auto result = fmt::format_to_bounded(buf, sizeof(buf), "用户：{}", "张伟");
+// result.out points one past the last written byte, result.fields_written
+// is the number of fully written replacement fields and result.truncated
+// reports whether formatting stopped early.
+```
+
+Literal text segments and replacement fields are written atomically: a unit
+is written only if it fits in the remaining budget in its entirety, so a
+multi-byte UTF-8 sequence is never split. The field that does not fit may
+have its formatter invoked once with the output discarded; fields after it
+are never formatted.
+
+::: format_to_bounded(char*, size_t, format_string<T...>, T&&...)
+
+::: vformat_to_bounded(char*, size_t, string_view, format_args)
+
+::: bounded_format_result
+
 <a id="ranges-api"></a>
 ## Range and Tuple Formatting
 
